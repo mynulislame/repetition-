@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anemoia Spaced Repetition</title>
+    <meta name="theme-color" content="#F8F6F2">
+    <link rel="manifest" href="manifest.json">
+    
+    <!-- React, ReactDOM, Babel & Tailwind via CDNs -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+        
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: #F8F6F2;
+            color: #3b3b3b;
+            user-select: none;
+        }
+
+        /* Matisse-style irregular borders */
+        .matisse-border-1 {
+            border: 2px solid #3b3b3b;
+            border-radius: 255px 15px 225px 15px/15px 225px 15px 255px;
+        }
+
+        .matisse-border-2 {
+            border: 2px solid #3b3b3b;
+            border-radius: 20px 225px 15px 200px/225px 15px 255px 15px;
+        }
+
+        .matisse-btn {
+            border: 2px solid #3b3b3b;
+            border-radius: 185px 25px 165px 35px/35px 175px 25px 195px;
+            box-shadow: 2px 3px 0px #3b3b3b;
+            transition: all 0.15s ease;
+        }
+
+        .matisse-btn:active {
+            transform: translate(2px, 3px);
+            box-shadow: 0px 0px 0px #3b3b3b;
+        }
+
+        /* Hide scrollbars for minimalist layout */
+        ::-webkit-scrollbar {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- SVG Noise Filter for Paper Texture Simulation -->
+    <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" style="position: fixed; width: 0; height: 0;">
+      <filter id="noiseFilter">
+        <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="3" stitchTiles="stitch"/>
+      </filter>
+    </svg>
+    <div style="position: fixed; width: 100vw; height: 100vh; top: 0; left: 0; filter: url(#noiseFilter); opacity: 0.035; pointer-events: none; z-index: 9999;"></div>
+
+    <div id="root"></div>
+
+    <!-- Application Script Engine -->
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // --- SM-2 Algorithm Engine ---
+        function calculateSM2(rating, prevRepetitions, prevInterval, prevEfactor) {
+            let repetitions = prevRepetitions;
+            let interval = prevInterval;
+            let efactor = prevEfactor;
+
+            if (rating >= 3) {
+                if (repetitions === 0) {
+                    interval = 1;
+                } else if (repetitions === 1) {
+                    interval = 6;
+                } else {
+                    interval = Math.round(interval * efactor);
+                }
+                repetitions++;
+            } else {
+                repetitions = 0;
+                interval = 1;
+            }
+
+            efactor = efactor + (0.1 - (5 - rating) * (0.08 + (5 - rating) * 0.02));
+            if (efactor < 1.3) efactor = 1.3;
+
+            const nextReviewDate = Date.now() + interval * 24 * 60 * 60 * 1000;
+
+            return { repetitions, interval, efactor, nextReviewDate };
+        }
+
+        function App() {
+            // Core States
+            const [decks, setDecks] = useState(() => JSON.parse(localStorage.getItem('decks')) || []);
+            const [cards, setCards] = useState(() => JSON.parse(localStorage.getItem('cards')) || []);
+            const [history, setHistory] = useState(() => JSON.parse(localStorage.getItem('reviewHistory')) || {});
+            
+            // Navigation States
+            const [currentView, setCurrentView] = useState('dashboard'); // dashboard, deck-view, review, settings
+            const [selectedDeckId, setSelectedDeckId] = useState(null);
+            
+            // Interaction States
+            const [newDeckName, setNewDeckName] = useState('');
+            const [cardFrontText, setCardFrontText] = useState('');
+            const [cardBackText, setCardBackText] = useState('');
+            const [cardFrontImg, setCardFrontImg] = useState('');
+            const [cardBackImg, setCardBackImg] = useState('');
+            
+            // Active Review States
+            const [reviewQueue, setReviewQueue] = useState([]);
+            const [currentReviewIdx, setCurrentReviewIdx] = useState(0);
+            const [isRevealed, setIsRevealed] = useState(false);
+
+            // Sync Database to LocalStorage
+            useEffect(() => { localStorage.setItem('decks', JSON.stringify(decks)); }, [decks]);
+            useEffect(() => { localStorage.setItem('cards', JSON.stringify(cards)); }, [cards]);
+            useEffect(() => { localStorage.setItem('reviewHistory', JSON.stringify(history)); }, [history]);
+
+            // Compute Global Due Metrics
+            const todayStart = new Date().setHours(0, 0, 0, 0);
+            const dueCardsCount = cards.filter(c => !c.nextReviewDate || c.nextReviewDate <= Date.now()).length;
+
+            // Image Processing to Base64 String
+            const handleImageUpload = (e, setter) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onloadend = () => setter(reader.result);
+                    reader.readAsDataURL(file);
+                }
+            };
+
+            // Deck Handling
+            const createDeck = () => {
+                if (!newDeckName.trim()) return;
+                const newDeck = { id: 'd-' + Date.now(), name: newDeckName.trim() };
+                setDecks([...decks, newDeck]);
+                setNewDeckName('');
+            };
+
+            const deleteDeck = (id, e) => {
+                e.stopPropagation();
+                setDecks(decks.filter(d => d.id !== id));
+                setCards(cards.filter(c => c.deckId !== id));
+            };
+
+            // Card Handling
+            const createCard = () => {
+                if (!cardFrontText.trim() && !cardFrontImg) return;
+                const newCard = {
+                    id: 'c-' + Date.now(),
+                    deckId: selectedDeckId,
+                    frontText: cardFrontText.trim(),
+                    backText: cardBackText.trim(),
+                    frontImg: cardFrontImg,
+                    backImg: cardBackImg,
+                    repetitions: 0,
+                    interval: 0,
+                    efactor: 2.5,
+                    nextReviewDate: 0
+                };
+                setCards([...cards, newCard]);
+                setCardFrontText(''); setCardBackText(''); setCardFrontImg(''); setCardBackImg('');
+            };
+
+            // Review Protocol Initialization
+            const startReview = (deckId = null) => {
+                const filtered = cards.filter(c => {
+                    const matchesDeck = deckId ? c.deckId === deckId : true;
+                    const isDue = !c.nextReviewDate || c.nextReviewDate <= Date.now();
+                    return matchesDeck && isDue;
+                });
+                if (filtered.length === 0) return alert('No cards due for evaluation.');
+                setReviewQueue(filtered);
+                setCurrentReviewIdx(0);
+                setIsRevealed(false);
+                setCurrentView('review');
+            };
+
+            // Process Review Rating Metric
+            const handleScore = (score) => {
+                const activeCard = reviewQueue[currentReviewIdx];
+                const update = calculateSM2(score, activeCard.repetitions, activeCard.interval, activeCard.efactor);
+                
+                // Update Master Card Array
+                setCards(cards.map(c => c.id === activeCard.id ? { ...c, ...update } : c));
+
+                // Document Daily Analytics Log
+                const datestring = new Date().toISOString().split('T')[0];
+                setHistory(prev => ({
+                    ...prev,
+                    [datestring]: (prev[datestring] || 0) + 1
+                }));
+
+                // Progress Queue Interface
+                if (currentReviewIdx + 1 < reviewQueue.length) {
+                    setCurrentReviewIdx(currentReviewIdx + 1);
+                    setIsRevealed(false);
+                } else {
+                    setCurrentView('dashboard');
+                    alert('Session complete.');
+                }
+            };
+
+            // Portability Layer: Export Configuration Data to CSV
+            const exportToCSV = () => {
+                let csvContent = "data:text/csv;charset=utf-8,FrontText,BackText,DeckName\n";
+                cards.forEach(c => {
+                    const deck = decks.find(d => d.id === c.deckId);
+                    const dName = deck ? deck.name : "Unassigned";
+                    csvContent += `"${c.frontText.replace(/"/g, '""')}","${c.backText.replace(/"/g, '""')}","${dName.replace(/"/g, '""')}"\n`;
+                });
+                const encodedUri = encodeURI(csvContent);
+                const link = document.createElement("a");
+                link.setAttribute("href", encodedUri);
+                link.setAttribute("download", `anemoia_backup_${Date.now()}.csv`);
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            };
+
+            // Portability Layer: Import Matrix Data From CSV
+            const handleCSVImport = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (evt) => {
+                    const lines = evt.target.result.split('\n').slice(1);
+                    let importedCards = [];
+                    let dynamicDecks = [...decks];
+
+                    lines.forEach(line => {
+                        if (!line.trim()) return;
+                        // Basic CSV structural field extraction regex
+                        const matches = line.match(/"([^"\\]*(?:\\.[^"\\]*)*)"/g);
+                        if (matches && matches.length >= 3) {
+                            const front = matches[0].replace(/^"|"$/g, '');
+                            const back = matches[1].replace(/^"|"$/g, '');
+                            const deckName = matches[2].replace(/^"|"$/g, '');
+
+                            let deckTarget = dynamicDecks.find(d => d.name === deckName);
+                            if (!deckTarget) {
+                                deckTarget = { id: 'd-' + Date.now() + Math.random(), name: deckName };
+                                dynamicDecks.push(deckTarget);
+                            }
+
+                            importedCards.push({
+                                id: 'c-' + Date.now() + Math.random(),
+                                deckId: deckTarget.id,
+                                frontText: front,
+                                backText: back,
+                                frontImg: '', backImg: '',
+                                repetitions: 0, interval: 0, efactor: 2.5, nextReviewDate: 0
+                            });
+                        }
+                    });
+
+                    setDecks(dynamicDecks);
+                    setCards([...cards, ...importedCards]);
+                    alert(`Successfully imported ${importedCards.length} flashcards.`);
+                };
+                reader.readAsText(file);
+            };
+
+            return (
+                <div className="max-w-md mx-auto min-h-screen px-4 py-6 flex flex-col justify-between">
+                    {/* Header bar */}
+                    <header className="flex justify-between items-center mb-6">
+                        <h1 className="text-2xl font-bold tracking-tight cursor-pointer" onClick={() => setCurrentView('dashboard')}>
+                            Anemoia
+                        </h1>
+                        <div className="flex gap-4 text-sm font-semibold">
+                            <button onClick={() => setCurrentView('dashboard')} className="hover:underline">Studio</button>
+                            <button onClick={() => setCurrentView('settings')} className="hover:underline">Portability</button>
+                        </div>
+                    </header>
+
+                    {/* View Controller Router */}
+                    {currentView === 'dashboard' && (
+                        <div className="flex-1 space-y-6">
+                            {/* Analytics Panel */}
+                            <div className="bg-[#a3b1b6]/20 p-5 matisse-border-1 flex justify-between items-center">
+                                <div>
+                                    <p className="text-xs uppercase tracking-wider font-semibold opacity-70">Evaluations Due</p>
+                                    <p className="text-4xl font-bold mt-1">{dueCardsCount}</p>
+                                </div>
+                                {dueCardsCount > 0 && (
+                                    <button onClick={() => startReview(null)} className="bg-[#b2bba6] text-[#3b3b3b] px-4 py-2 font-bold matisse-btn text-sm">
+                                        Review All
+                                    </button>
+                                )}
+                            </div>
+
+                            {/* Activity Heatmap Grid */}
+                            <div>
+                                <h3 className="text-xs uppercase tracking-wider font-semibold mb-2 opacity-70">Consistency Heatmap (30 Days)</h3>
+                                <div className="grid grid-cols-10 gap-1.5 p-3 bg-white/40 matisse-border-2">
+                                    {Array.from({ length: 30 }).map((_, i) => {
+                                        const d = new Date();
+                                        d.setDate(d.getDate() - (29 - i));
+                                        const dateStr = d.toISOString().split('T')[0];
+                                        const count = history[dateStr] || 0;
+                                        let opacityClass = "bg-[#3b3b3b]/5";
+                                        if (count > 0 && count <= 3) opacityClass = "bg-[#b2bba6]";
+                                        if (count > 3 && count <= 8) opacityClass = "bg-[#a3b1b6]";
+                                        if (count > 8) opacityClass = "bg-[#d1b8b4]";
+                                        return (
+                                            <div key={i} title={`${dateStr}: ${count} items`} className={`aspect-square ${opacityClass} rounded-sm border border-[#3b3b3b]/10`} />
+                                        );
+                                    })}
+                                </div>
+                            </div>
+
+                            {/* Deck Aggregator Core */}
+                            <div className="space-y-3">
+                                <h3 className="text-xs uppercase tracking-wider font-semibold opacity-70">Decks Library</h3>
+                                <div className="grid gap-4">
+                                    {decks.map(deck => {
+                                        const deckDue = cards.filter(c => c.deckId === deck.id && (!c.nextReviewDate || c.nextReviewDate <= Date.now())).length;
+                                        return (
+                                            <div key={deck.id} onClick={() => { setSelectedDeckId(deck.id); setCurrentView('deck-view'); }}
+                                                 className="bg-white p-4 matisse-border-1 flex justify-between items-center cursor-pointer hover:bg-[#F8F6F2] transition-colors">
+                                                <div>
+                                                    <h4 className="font-bold text-lg">{deck.name}</h4>
+                                                    <p className="text-xs opacity-60">{cards.filter(c => c.deckId === deck.id).length} cards total</p>
+                                                </div>
+                                                <div className="flex items-center gap-3">
+                                                    {deckDue > 0 && <span className="bg-[#d1b8b4] px-2 py-0.5 text-xs font-bold rounded-full border border-[#3b3b3b]">{deckDue} due</span>}
+                                                    <button onClick={(e) => deleteDeck(deck.id, e)} className="text-xs text-red-700 font-medium hover:underline p-1">Delete</button>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+
+                            {/* Quick Creation Deck Field */}
+                            <div className="flex gap-2 mt-4">
+                                <input type="text" placeholder="New Deck Designation..." value={newDeckName} onChange={e => setNewDeckName(e.target.value)}
+                                       className="flex-1 bg-white px-3 py-2 text-sm border-2 border-[#3b3b3b] rounded-md outline-none" />
+                                <button onClick={createDeck} className="bg-[#a3b1b6] px-4 py-2 text-sm font-bold matisse-btn">Build Deck</button>
+                            </div>
+                        </div>
+                    )}
+
+                    {currentView === 'deck-view' && (() => {
+                        const activeDeck = decks.find(d => d.id === selectedDeckId);
+                        const deckDue = cards.filter(c => c.deckId === selectedDeckId && (!c.nextReviewDate || c.nextReviewDate <= Date.now())).length;
+                        return (
+                            <div className="flex-1 space-y-6">
+                                <div className="flex justify-between items-center">
+                                    <button onClick={() => setCurrentView('dashboard')} className="text-sm font-semibold opacity-70 hover:underline">← Studio Return</button>
+                                    {deckDue > 0 && <button onClick={() => startReview(selectedDeckId)} className="bg-[#b2bba6] px-4 py-1.5 text-xs font-bold matisse-btn">Review Due ({deckDue})</button>}
+                                </div>
+                                <div>
+                                    <h2 className="text-2xl font-bold">{activeDeck?.name}</h2>
+                                    <p className="text-xs opacity-60">Deck Catalog Administration</p>
+                                </div>
+
+                                {/* Flashcard Creator Matrix */}
+                                <div className="bg-white p-4 matisse-border-2 space-y-4">
+                                    <h4 className="text-xs uppercase tracking-wider font-semibold opacity-70">Construct Atomic Flashcard</h4>
+                                    
+                                    {/* Front Config */}
+                                    <div className="space-y-1">
+                                        <textarea placeholder="Front side prompt text..." value={cardFrontText} onChange={e => setCardFrontText(e.target.value)} className="w-full text-sm p-2 border border-[#3b3b3b] rounded-sm h-16 resize-none outline-none" />
+                                        <label className="block text-xs font-semibold cursor-pointer text-[#a3b1b6] hover:underline">
+                                            {cardFrontImg ? "✓ Front Image Embedded" : "+ Upload Front Interface Graphic"}
+                                            <input type="file" accept="image/*" className="hidden" onChange={e => handleImageUpload(e, setCardFrontImg)} />
+                                        </label>
+                                    </div>
+
+                                    {/* Back Config */}
+                                    <div className="space-y-1">
+                                        <textarea placeholder="Back side validation key..." value={cardBackText} onChange={e => setCardBackText(e.target.value)} className="w-full text-sm p-2 border border-[#3b3b3b] rounded-sm h-16 resize-none outline-none" />
+                                        <label className="block text-xs font-semibold cursor-pointer text-[#a3b1b6] hover:underline">
+                                            {cardBackImg ? "✓ Back Image Embedded" : "+ Upload Back Interface Graphic"}
+                                            <input type="file" accept="image/*" className="hidden" onChange={e => handleImageUpload(e, setCardBackImg)} />
+                                        </label>
+                                    </div>
+
+                                    <button onClick={createCard} className="w-full bg-[#3b3b3b] text-[#F8F6F2] py-2 text-sm font-bold matisse-btn">Commit Card to Storage</button>
+                                </div>
+
+                                {/* Local Catalog Inventory */}
+                                <div className="space-y-2">
+                                    <h4 className="text-xs uppercase tracking-wider font-semibold opacity-70">Deck Assets ({cards.filter(c => c.deckId === selectedDeckId).length})</h4>
+                                    <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                                        {cards.filter(c => c.deckId === selectedDeckId).map(c => (
+                                            <div key={c.id} className="p-3 bg-white/60 border border-[#3b3b3b]/30 rounded-sm text-xs flex justify-between items-center">
+                                                <p className="truncate font-medium max-w-[70%]">{c.frontText || "[Graphic Matrix Elements]"}</p>
+                                                <button onClick={() => setCards(cards.filter(card => card.id !== c.id))} className="text-red-700 hover:underline">Drop</button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })()}
+
+                    {currentView === 'review' && (() => {
+                        const activeCard = reviewQueue[currentReviewIdx];
+                        if (!activeCard) return null;
+                        return (
+                            <div className="flex-1 flex flex-col justify-between py-4">
+                                <div className="w-full bg-[#3b3b3b]/10 rounded-full h-1 mb-6">
+                                    <div className="bg-[#3b3b3b] h-1 rounded-full transition-all duration-300" style={{ width: `${((currentReviewIdx + 1) / reviewQueue.length) * 100}%` }} />
+                                </div>
+
+                                {/* Main Evaluation Canvas */}
+                                <div className="flex-1 flex flex-col justify-center items-center">
+                                    {!isRevealed ? (
+                                        /* Front View Card */
+                                        <div className="w-full min-h-[300px] bg-white p-6 matisse-border-1 flex flex-col justify-center items-center text-center space-y-4">
+                                            {activeCard.frontImg && <img src={activeCard.frontImg} className="max-h-40 object-contain rounded-md matisse-border-2 p-1" />}
+                                            <p className="text-lg font-medium">{activeCard.frontText}</p>
+                                        </div>
+                                    ) : (
+                                        /* Back View Card */
+                                        <div className="w-full min-h-[300px] bg-white p-6 matisse-border-2 flex flex-col justify-center items-center text-center space-y-4 animate-fadeIn">
+                                            {activeCard.backImg && <img src={activeCard.backImg} className="max-h-40 object-contain rounded-md matisse-border-1 p-1" />}
+                                            <p className="text-lg font-medium border-b border-[#3b3b3b]/10 pb-4 w-full">{activeCard.frontText}</p>
+                                            <p className="text-xl font-bold text-[#a3b1b6]">{activeCard.backText}</p>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Controller Interlocking Dashboard Interface */}
+                                <div className="mt-8">
+                                    {!isRevealed ? (
+                                        <button onClick={() => setIsRevealed(true)} className="w-full bg-[#a3b1b6] text-white font-bold py-3 matisse-btn text-md">
+                                            Reveal Verification Target
+                                        </button>
+                                    ) : (
+                                        <div className="grid grid-cols-4 gap-2">
+                                            <button onClick={() => handleScore(0)} className="bg-[#d1b8b4] py-3 text-xs font-bold matisse-btn">Again (0)</button>
+                                            <button onClick={() => handleScore(3)} className="bg-[#F8F6F2] py-3 text-xs font-bold matisse-btn">Hard (3)</button>
+                                            <button onClick={() => handleScore(4)} className="bg-[#a3b1b6] text-white py-3 text-xs font-bold matisse-btn">Good (4)</button>
+                                            <button onClick={() => handleScore(5)} className="bg-[#b2bba6] py-3 text-xs font-bold matisse-btn">Easy (5)</button>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })()}
+
+                    {currentView === 'settings' && (
+                        <div className="flex-1 space-y-6">
+                            <div>
+                                <h2 className="text-2xl font-bold">Portability Subsystem</h2>
+                                <p className="text-xs opacity-60">Backup execution tools and matrix imports</p>
+                            </div>
+
+                            <div className="bg-white p-5 matisse-border-1 space-y-4">
+                                <h3 className="font-bold border-b border-[#3b3b3b]/10 pb-2 text-sm">Data Extraction</h3>
+                                <p className="text-xs opacity-70">Download your decks and history configuration matrices into a single readable CSV document file format.</p>
+                                <button onClick={exportToCSV} className="bg-[#a3b1b6] w-full py-2 text-sm font-bold matisse-btn">Run CSV Export</button>
+                            </div>
+
+                            <div className="bg-white p-5 matisse-border-2 space-y-4">
+                                <h3 className="font-bold border-b border-[#3b3b3b]/10 pb-2 text-sm">Database Sync</h3>
+                                <p className="text-xs opacity-70">Import existing comma-delimited documents. Format: FrontText,BackText,DeckName columns inside quotes.</p>
+                                <label className="block w-full text-center bg-[#b2bba6] py-2 text-sm font-bold matisse-btn cursor-pointer">
+                                    Select and Parse CSV
+                                    <input type="file" accept=".csv" className="hidden" onChange={handleCSVImport} />
+                                </label>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Footer legalities signature markup block */}
+                    <footer className="text-center text-[10px] opacity-40 mt-8 tracking-wider uppercase">
+                        Anemoia Engine Matrix • Architecture Uncompromised
+                    </footer>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
